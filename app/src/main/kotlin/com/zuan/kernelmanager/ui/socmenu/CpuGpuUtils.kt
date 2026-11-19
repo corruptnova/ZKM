@@ -260,8 +260,9 @@ object CpuGpuUtils {
         
         val genericPath = GenericGpuUtils.getGpuPath()
         if (genericPath != null) {
-            val loadFile = File("$genericPath/load")
-            if (loadFile.exists()) return@withContext Utils.readFile(loadFile.absolutePath).split("@")[0].trim()
+            // Dibaca via root: SELinux memblokir File.exists() dari proses app untuk node devfreq
+            val raw = Utils.readFile("$genericPath/load")
+            Regex("^\\s*(\\d+)").find(raw)?.let { return@withContext it.groupValues[1] }
         }
         "0"
     }

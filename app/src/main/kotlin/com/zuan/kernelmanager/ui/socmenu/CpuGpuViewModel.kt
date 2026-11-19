@@ -12,6 +12,7 @@ import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.zuan.kernelmanager.ui.settings.SettingsPreference
+import com.zuan.kernelmanager.utils.GenericGpuUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -136,6 +137,10 @@ class CpuGpuViewModel(application: Application) : AndroidViewModel(application) 
         
         if (type == CpuGpuUtils.GpuType.ADRENO) {
             val freq = CpuGpuUtils.readFreqGPU(CpuGpuUtils.CURRENT_FREQ_GPU)
+            _gpuState.value = GPUState(type, freq, usage)
+        } else if (type == CpuGpuUtils.GpuType.GENERIC_DEVFREQ) {
+            val path = GenericGpuUtils.getGpuPath()
+            val freq = path?.let { GenericGpuUtils.getCurFreq(it) }?.takeIf { it.isNotEmpty() } ?: "Dynamic"
             _gpuState.value = GPUState(type, freq, usage)
         } else {
             _gpuState.value = GPUState(type, "Dynamic", usage)

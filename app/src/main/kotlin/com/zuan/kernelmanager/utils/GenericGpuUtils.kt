@@ -10,144 +10,124 @@ package com.zuan.kernelmanager.utils
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
 
+/**
+ * GPU devfreq generik (Mali/Exynos, Xclipse, Tensor G5 PowerVR "*.gpu0", dll).
+ *
+ * Semua akses sysfs lewat root shell: SELinux memblokir proses app biasa
+ * membaca /sys/class/devfreq di Android modern, jadi java.io.File tidak bisa diandalkan.
+ */
 object GenericGpuUtils {
 
     // Cache path agar tidak perlu searching ulang setiap kali request
-    private var cachedGpuPath: String? = null
+    @Volatile private var cachedGpuPath: String? = null
 
-    // Path statis yang umum digunakan (fallback)
+    // Path statis GPU (fallback). Hanya node GPU — jangan masukkan devfreq bus/DRAM.
     private val POTENTIAL_PATHS = listOf(
-        "/sys/class/devfreq/mtk-dvfsrc-devfreq",
-        "/sys/class/devfreq/dfrgx", // Samsung/Mali Legacy
+        "/sys/class/devfreq/dfrgx", // Intel/PowerVR Legacy
         "/sys/devices/platform/dfrgx/devfreq/dfrgx",
-        "/sys/class/kgsl/kgsl-3d0/devfreq", // Snapdragon
-        "/sys/kernel/gpu", // Generic Kernel interface
+        "/sys/kernel/gpu", // Samsung Generic Kernel interface
         "/sys/kernel/tegra_gpu" // Nvidia Tegra
     )
 
     /**
      * Mencari path devfreq GPU yang valid.
-     * Updated: Support Exynos Xclipse (*.sgpu) dan pencarian lebih luas.
+     * Support Exynos Mali, Xclipse (*.sgpu), dan Tensor G5 PowerVR (34f00000.gpu0).
      */
     suspend fun getGpuPath(): String? = withContext(Dispatchers.IO) {
-        if (cachedGpuPath != null) return@withContext cachedGpuPath
+        cachedGpuPath?.let { return@withContext it }
 
-        // 1. Coba cari menggunakan command 'find' (Paling akurat untuk Mali/Exynos/Xclipse)
         val searchCmds = listOf(
             "find /sys/class/devfreq/ -iname \"*.mali\" -print -quit", // Exynos Mali
             "find /sys/class/devfreq/ -iname \"*.sgpu\" -print -quit", // Exynos Xclipse (AMD)
-            "find /sys/class/devfreq/ -iname \"*gpu*\" -print -quit",  // Generic catch-all
+            "find /sys/class/devfreq/ -iname \"*gpu*\" -print -quit",  // Generic (mis. Tensor G5: 34f00000.gpu0)
             "find /sys/devices/platform/ -iname \"*.mali\" -print -quit"
         )
 
         for (cmd in searchCmds) {
             try {
                 val res = Shell.cmd(cmd).exec()
-                if (res.isSuccess && res.out.isNotEmpty()) {
-                    val path = res.out.first().trim()
-                    if (isValidDevfreq(path)) {
-                        cachedGpuPath = path
-                        return@withContext path
-                    }
+                val path = res.out.firstOrNull()?.trim()
+                if (res.isSuccess && !path.isNullOrEmpty() && isValidDevfreq(path)) {
+                    cachedGpuPath = path
+                    return@withContext path
                 }
             } catch (e: Exception) { /* ignore */ }
         }
 
-        // 2. Cek List Path Statis
         for (path in POTENTIAL_PATHS) {
             if (isValidDevfreq(path)) {
                 cachedGpuPath = path
                 return@withContext path
             }
         }
-        
-        // 3. Scan manual folder /sys/class/devfreq sebagai upaya terakhir
-        val devfreqDir = File("/sys/class/devfreq")
-        if (devfreqDir.exists()) {
-             devfreqDir.listFiles()?.forEach { 
-                 if (isValidDevfreq(it.absolutePath)) {
-                     cachedGpuPath = it.absolutePath
-                     return@withContext it.absolutePath
-                 }
-             }
-        }
 
+        // Sengaja TIDAK fallback ke devfreq pertama di /sys/class/devfreq:
+        // itu biasanya bus/memori (MIF/INT/DSU), dan mengubah frekuensinya bukan tuning GPU.
         null
     }
 
     private fun isValidDevfreq(path: String): Boolean {
-        // Path dianggap valid jika folder ada dan memiliki node frequencies atau governor
-        val f = File(path)
-        return f.exists() && 
-               (File("$path/available_frequencies").exists() || 
-                File("$path/available_governors").exists() ||
-                File("$path/trans_stat").exists()) 
+        // Valid jika folder ada dan punya node devfreq standar (dicek via root)
+        val res = Shell.cmd(
+            "[ -e \"$path/available_frequencies\" ] || [ -e \"$path/available_governors\" ] || [ -e \"$path/trans_stat\" ] && echo ok"
+        ).exec()
+        return res.out.firstOrNull()?.trim() == "ok"
+    }
+
+    // === UNITS ===
+
+    /**
+     * Devfreq GPU melaporkan Hz (mis. 1094000000) atau KHz (mis. 1094000) tergantung driver.
+     * Frekuensi GPU nyata selalu >= 10 MHz, jadi angka >= 10^7 pasti Hz, >= 10^4 pasti KHz.
+     */
+    fun toMhz(raw: String): String {
+        val v = raw.trim().toLongOrNull() ?: return raw.trim()
+        return when {
+            v >= 10_000_000L -> (v / 1_000_000L).toString() // Hz -> MHz
+            v >= 10_000L -> (v / 1_000L).toString() // KHz -> MHz
+            else -> v.toString() // Sudah MHz
+        }
     }
 
     // === COMMANDS ===
 
-    suspend fun getMinFreq(path: String): String = Utils.readFile("$path/min_freq")
-    suspend fun getMaxFreq(path: String): String = Utils.readFile("$path/max_freq")
-    suspend fun getCurFreq(path: String): String = Utils.readFile("$path/cur_freq")
+    suspend fun getMinFreq(path: String): String = toMhz(Utils.readFile("$path/min_freq"))
+    suspend fun getMaxFreq(path: String): String = toMhz(Utils.readFile("$path/max_freq"))
+    suspend fun getCurFreq(path: String): String = toMhz(Utils.readFile("$path/cur_freq"))
     suspend fun getGov(path: String): String = Utils.readFile("$path/governor")
 
+    private fun readTokens(file: String): List<String> =
+        Utils.readFile(file).split(Regex("\\s+")).filter { it.isNotBlank() }
+
     suspend fun getAvailableFreqs(path: String): List<String> = withContext(Dispatchers.IO) {
-        val file = File("$path/available_frequencies")
-        if (!file.exists()) return@withContext emptyList()
-        
-        try {
-            file.readText().trim().split(" ").filter { it.isNotBlank() }.map { 
-                // Normalisasi: Devfreq biasanya Hz atau KHz. Kita ubah ke MHz agar seragam di UI.
-                val freqVal = it.toLongOrNull() ?: 0L
-                when {
-                    freqVal > 1_000_000 -> (freqVal / 1_000_000).toString() // Hz -> MHz
-                    freqVal > 1_000 -> (freqVal / 1_000).toString() // KHz -> MHz
-                    else -> it // Anggap sudah MHz atau format lain
-                }
-            }
-        } catch (e: Exception) { emptyList() }
+        readTokens("$path/available_frequencies")
+            .map { toMhz(it) }
+            .distinct()
+            .sortedBy { it.toLongOrNull() ?: 0L }
     }
 
     suspend fun getAvailableGovs(path: String): List<String> = withContext(Dispatchers.IO) {
-        val file = File("$path/available_governors")
-        if (file.exists()) file.readText().trim().split(" ") else emptyList()
+        readTokens("$path/available_governors")
     }
 
-    suspend fun setFreq(path: String, type: String, freqMHz: String) {
-        // Updated: Logic Samsung DVFS Lock handling
-        
+    suspend fun setFreq(path: String, type: String, freqMHz: String) = withContext(Dispatchers.IO) {
         // 1. Cari raw value dari available_frequencies yang cocok dengan MHz user
-        val rawContent = Utils.readFile("$path/available_frequencies")
-        val rawFreqs = rawContent.split(" ")
-        
-        // Cari frekuensi mentah yang cocok (Reverse Matching)
-        val targetRaw = rawFreqs.find { 
-             val valL = it.toLongOrNull() ?: 0L
-             val mhz = if (valL > 1000000) valL/1000000 else if (valL > 1000) valL/1000 else valL
-             mhz.toString() == freqMHz
-        } ?: freqMHz // Fallback pakai input user
+        val targetRaw = readTokens("$path/available_frequencies").find { toMhz(it) == freqMHz }
+            ?: return@withContext false // Jangan tulis nilai MHz mentah ke node yang memakai Hz/KHz
 
         // 2. Tentukan Node target
         val standardNode = if (type == "min") "min_freq" else "max_freq"
         val lockNode = if (type == "min") "dvfs_min_lock" else "dvfs_max_lock"
 
-        // 3. Cek apakah Lock Node ada (Samsung Specific)
-        // Kita pakai Shell check karena File.exists() kadang false positif di folder sysfs root
+        // 3. Samsung: tulis ke DVFS Lock agar tidak di-overwrite sistem
         val checkLock = Shell.cmd("[ -f \"$path/$lockNode\" ] && echo true").exec()
-        val hasLockFile = checkLock.isSuccess && checkLock.out.firstOrNull() == "true"
+        val hasLockFile = checkLock.out.firstOrNull()?.trim() == "true"
 
-        if (hasLockFile) {
-            // Samsung Priority: Tulis ke DVFS Lock agar tidak di-overwrite sistem
-            Utils.writeFile("$path/$lockNode", targetRaw)
-        } else {
-            // Standard Linux Kernel
-            Utils.writeFile("$path/$standardNode", targetRaw)
-        }
+        Utils.writeFile("$path/${if (hasLockFile) lockNode else standardNode}", targetRaw)
     }
 
-    suspend fun setGov(path: String, gov: String) {
+    suspend fun setGov(path: String, gov: String) = withContext(Dispatchers.IO) {
         Utils.writeFile("$path/governor", gov)
     }
 }

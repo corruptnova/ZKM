@@ -124,6 +124,7 @@ import com.zuan.kernelmanager.ui.ksuweb.KsuWebuiScreen
 
 import com.zuan.kernelmanager.ui.gpu.adreno.AdrenoScreen
 import com.zuan.kernelmanager.ui.gpu.mtk.MtkScreen
+import com.zuan.kernelmanager.ui.gpu.generic.GenericGpuScreen
 import com.zuan.kernelmanager.ui.logsview.LogsViewScreen
 
 import com.zuan.kernelmanager.ui.home.menu.DebloatFreezeScreen
@@ -518,6 +519,7 @@ fun ZuanKernelManagerApp(showRootDialog: Boolean = false) {
                     // GPU Screens - pakai package baru
                     composable(NavigationRoute.Adreno.route) { AdrenoScreen(navController = navController) }
                     composable(NavigationRoute.Mtk.route) { MtkScreen(navController = navController) }
+                    composable(NavigationRoute.GenericGpu.route) { GenericGpuScreen(navController = navController) }
                     
                     
                     composable(NavigationRoute.LogsView.route) { LogsViewScreen() }
