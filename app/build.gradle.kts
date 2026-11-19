@@ -22,7 +22,20 @@ android {
         buildConfigField("boolean", "ENABLE_BETA_FEATURES", "true")
     }
 
-    
+
+    // Signing rilis opsional (dipakai CI). Tanpa env var ini, release build tetap unsigned.
+    val releaseKeystore = System.getenv("ZKM_KEYSTORE_FILE")?.let { file(it) }?.takeIf { it.exists() }
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("ZKM_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ZKM_KEY_ALIAS")
+                keyPassword = System.getenv("ZKM_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             // debug build
@@ -36,6 +49,7 @@ android {
                 "proguard-rules.pro"
             )
             buildConfigField("boolean", "ENABLE_BETA_FEATURES", "false")
+            if (releaseKeystore != null) signingConfig = signingConfigs.getByName("release")
         }
     }
 

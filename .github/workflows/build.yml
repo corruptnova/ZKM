@@ -1,0 +1,81 @@
+name: Build APK
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore: ["**.md", "docs/**", "logo/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle (with cache)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      - name: Build debug APK
+        run: ./gradlew --stacktrace :app:assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZKM-debug-${{ github.sha }}
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      # Signed release: only runs when the keystore secrets are set
+      # (not available to pull requests from forks).
+      - name: Decode release keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ZKM_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "No ZKM_KEYSTORE_BASE64 secret; skipping signed release build."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "present=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed release APK
+        if: steps.keystore.outputs.present == 'true'
+        env:
+          ZKM_KEYSTORE_FILE: ${{ runner.temp }}/release.jks
+          ZKM_KEYSTORE_PASSWORD: ${{ secrets.ZKM_KEYSTORE_PASSWORD }}
+          ZKM_KEY_ALIAS: ${{ secrets.ZKM_KEY_ALIAS }}
+          ZKM_KEY_PASSWORD: ${{ secrets.ZKM_KEY_PASSWORD }}
+        run: ./gradlew --stacktrace :app:assembleRelease
+
+      - name: Upload release APK
+        if: steps.keystore.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZKM-release-${{ github.sha }}
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
