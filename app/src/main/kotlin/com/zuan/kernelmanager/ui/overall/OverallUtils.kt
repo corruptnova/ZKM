@@ -20,6 +20,7 @@ import android.view.WindowManager
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import com.topjohnwu.superuser.Shell
+import com.zuan.kernelmanager.utils.GenericGpuUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -307,6 +308,13 @@ object OverallUtils {
                 val p = clean.toIntOrNull()
                 if (p != null) return@withContext Pair(freqStr, p)
             }
+        }
+
+        // GPU devfreq generik (Exynos, Tensor G5 PowerVR, dll)
+        GenericGpuUtils.getGpuPath()?.let { path ->
+            val curMhz = GenericGpuUtils.getCurFreq(path)
+            val genericFreq = if (curMhz.toLongOrNull() != null) "$curMhz MHz" else freqStr
+            return@withContext Pair(genericFreq, GenericGpuUtils.getLoad(path) ?: 0)
         }
 
         return@withContext Pair(freqStr, 0)

@@ -7,8 +7,12 @@
  */
 package com.zuan.kernelmanager.utils
 
+import android.os.SystemClock
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -125,6 +129,66 @@ object GenericGpuUtils {
         val hasLockFile = checkLock.out.firstOrNull()?.trim() == "true"
 
         Utils.writeFile("$path/${if (hasLockFile) lockNode else standardNode}", targetRaw)
+    }
+
+    // === LOAD ===
+
+    private val loadMutex = Mutex()
+    private var lastBusyMs = -1L
+    private var lastSampleAt = 0L
+    private var lastLoad = 0
+
+    /**
+     * Load GPU dalam persen, atau null jika tidak ada sumber load.
+     *
+     * 1. Node `load` (format "45@396000000") jika driver menyediakannya.
+     * 2. `device/uid_time_in_state` (Pixel / Tensor G5 PowerVR): waktu aktif GPU per-UID per-frekuensi
+     *    dalam ms. Load = Δ(total waktu aktif) / Δ(waktu nyata). Butuh dua sampel.
+     */
+    suspend fun getLoad(path: String): Int? = withContext(Dispatchers.IO) {
+        Regex("^\\s*(\\d+)").find(Utils.readFile("$path/load"))?.let {
+            return@withContext it.groupValues[1].toInt().coerceIn(0, 100)
+        }
+
+        loadMutex.withLock {
+            var busy = readUidBusyMs(path) ?: return@withLock null
+            var now = SystemClock.elapsedRealtime()
+
+            // Belum ada baseline (atau terlalu lama): ambil sampel kedua sebentar lagi
+            if (lastBusyMs < 0 || now - lastSampleAt > 10_000L) {
+                lastBusyMs = busy
+                lastSampleAt = now
+                delay(250)
+                busy = readUidBusyMs(path) ?: return@withLock null
+                now = SystemClock.elapsedRealtime()
+            }
+
+            val dt = now - lastSampleAt
+            if (dt < 200L) return@withLock lastLoad // Interval terlalu pendek, hasil akan noise
+
+            val dBusy = busy - lastBusyMs
+            // dBusy < 0: baris UID hilang (app di-uninstall) -> pertahankan nilai lama, reset baseline.
+            // Beberapa app bisa memakai GPU bersamaan, jadi total bisa > 100%.
+            if (dBusy >= 0) lastLoad = (dBusy * 100 / dt).toInt().coerceIn(0, 100)
+            lastBusyMs = busy
+            lastSampleAt = now
+            lastLoad
+        }
+    }
+
+    private fun readUidBusyMs(path: String): Long? = sumUidTimeInState(Utils.readFile("$path/device/uid_time_in_state"))
+
+    /** Total semua kolom waktu di uid_time_in_state ("uid: f1 f2 ..." lalu "10367: t1 t2 ..."). */
+    fun sumUidTimeInState(text: String): Long? {
+        var total = 0L
+        var rows = 0
+        for (line in text.lineSequence()) {
+            val parts = line.split(':', limit = 2)
+            if (parts.size != 2 || parts[0].trim().toLongOrNull() == null) continue // Header "uid:" / baris rusak
+            total += parts[1].trim().split(Regex("\\s+")).sumOf { it.toLongOrNull() ?: 0L }
+            rows++
+        }
+        return if (rows > 0) total else null
     }
 
     suspend fun setGov(path: String, gov: String) = withContext(Dispatchers.IO) {
